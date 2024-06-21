@@ -15,7 +15,6 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from functools import lru_cache
 from typing import Dict, List, NamedTuple, Optional, Type, cast
-
 from dataclasses_json import DataClassJsonMixin, dataclass_json
 from flyteidl.core import literals_pb2
 from google.protobuf import json_format as _json_format
@@ -153,7 +152,7 @@ class TypeTransformer(typing.Generic[T]):
         return self._type_assertions_enabled
 
     def assert_type(self, t: Type[T], v: T):
-        if not hasattr(t, "__origin__") and not isinstance(v, t):
+        if not ((get_origin(t) is not None) or isinstance(v, t)):
             raise TypeTransformerFailedError(f"Expected value of type {t} but got '{v}' of type {type(v)}")
 
     @abstractmethod
