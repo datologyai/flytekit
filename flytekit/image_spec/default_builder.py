@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,14 +24,14 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \
     --mount=from=uv,source=/uv,target=/usr/bin/uv \
     --mount=type=bind,target=requirements_uv.txt,src=requirements_uv.txt \
     /usr/bin/uv \
-    pip install --python /root/micromamba/envs/dev/bin/python $PIP_EXTRA \
+    pip install --python /opt/micromamba/envs/dev/bin/python $PIP_EXTRA \
     --requirement requirements_uv.txt
 """)
 
 PIP_PYTHON_INSTALL_COMMAND_TEMPLATE = Template("""\
 RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/pip,id=pip \
     --mount=type=bind,target=requirements_pip.txt,src=requirements_pip.txt \
-    /root/micromamba/envs/dev/bin/python -m pip install $PIP_EXTRA \
+    /opt/micromamba/envs/dev/bin/python -m pip install $PIP_EXTRA \
     --requirement requirements_pip.txt
 """)
 
@@ -56,22 +58,25 @@ RUN update-ca-certificates
 RUN id -u flytekit || useradd --create-home --shell /bin/bash flytekit
 RUN chown -R flytekit /root && chown -R flytekit /home
 
-RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/micromamba/pkgs,\
+RUN --mount=type=cache,sharing=locked,mode=0777,target=/opt/micromamba/pkgs,\
 id=micromamba \
     --mount=from=micromamba,source=/usr/bin/micromamba,target=/usr/bin/micromamba \
-    /usr/bin/micromamba create -n dev -c conda-forge $CONDA_CHANNELS \
+    /usr/bin/micromamba create -n dev --root-prefix /opt/micromamba \
+    -c conda-forge $CONDA_CHANNELS \
     python=$PYTHON_VERSION $CONDA_PACKAGES
 
 $UV_PYTHON_INSTALL_COMMAND
 $PIP_PYTHON_INSTALL_COMMAND
 
 # Configure user space
-ENV PATH="/root/micromamba/envs/dev/bin:$$PATH"
+ENV PATH="/opt/micromamba/envs/dev/bin:$$PATH"
 ENV FLYTE_SDK_RICH_TRACEBACKS=0 SSL_CERT_DIR=/etc/ssl/certs $ENV
 
 # Adds nvidia just in case it exists
 ENV PATH="$$PATH:/usr/local/nvidia/bin:/usr/local/cuda/bin" \
     LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$$LD_LIBRARY_PATH"
+
+$ENTRYPOINT
 
 $COPY_COMMAND_RUNTIME
 RUN $RUN_COMMANDS
@@ -80,7 +85,8 @@ WORKDIR /root
 SHELL ["/bin/bash", "-c"]
 
 USER flytekit
-RUN echo "export PATH=$$PATH" >> $$HOME/.profile
+RUN mkdir -p $$HOME && \
+    echo "export PATH=$$PATH" >> $$HOME/.profile
 """
 )
 
@@ -95,11 +101,25 @@ def get_flytekit_for_pypi():
         return f"flytekit=={__version__}"
 
 
+_PACKAGE_NAME_RE = re.compile(r"^[\w-]+")
+
+
+def _is_flytekit(package: str) -> bool:
+    """Return True if `package` is flytekit. `package` is expected to be a valid version
+    spec. i.e. `flytekit==1.12.3`, `flytekit`, `flytekit~=1.12.3`.
+    """
+    m = _PACKAGE_NAME_RE.match(package)
+    if not m:
+        return False
+    name = m.group()
+    return name == "flytekit"
+
+
 def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
     """Populate tmp_dir with Dockerfile as specified by the `image_spec`."""
     base_image = image_spec.base_image or "debian:bookworm-slim"
 
-    requirements = [get_flytekit_for_pypi()]
+    requirements = []
 
     if image_spec.cuda is not None or image_spec.cudnn is not None:
         msg = (
@@ -120,6 +140,10 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
 
     if image_spec.packages:
         requirements.extend(image_spec.packages)
+
+    # Adds flytekit if it is not specified
+    if not any(_is_flytekit(package) for package in requirements):
+        requirements.append(get_flytekit_for_pypi())
 
     uv_requirements = []
 
@@ -191,6 +215,11 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
     else:
         python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
 
+    if image_spec.entrypoint is None:
+        entrypoint = ""
+    else:
+        entrypoint = f"ENTRYPOINT {json.dumps(image_spec.entrypoint)}"
+
     if image_spec.commands:
         run_commands = " && ".join(image_spec.commands)
     else:
@@ -206,6 +235,7 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
         BASE_IMAGE=base_image,
         ENV=env,
         COPY_COMMAND_RUNTIME=copy_command_runtime,
+        ENTRYPOINT=entrypoint,
         RUN_COMMANDS=run_commands,
     )
 
