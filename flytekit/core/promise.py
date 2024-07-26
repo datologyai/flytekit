@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import inspect
+import dataclasses
 import typing
 from copy import deepcopy
 from enum import Enum
@@ -80,18 +81,24 @@ def translate_inputs_to_literals(
     :param flyte_interface_types: One side of an :py:class:`flytekit.models.interface.TypedInterface` basically.
     :param native_types: Map to native Python type.
     """
-    if incoming_values is None:
-        raise AssertionError("Incoming values cannot be None, must be a dict")
+    if incoming_values is None:        raise ValueError("Incoming values cannot be None, must be a dict")
 
     result = {}  # So as to not overwrite the input_kwargs
     for k, v in incoming_values.items():
         if k not in flyte_interface_types:
-            raise AssertionError(f"Received unexpected keyword argument {k}")
+            raise ValueError(f"Received unexpected keyword argument {k}")
         var = flyte_interface_types[k]
         t = native_types[k]
         try:
             if type(v) is Promise:
                 v = resolve_attr_path_in_promise(v)
+            if dataclasses.is_dataclass(v):
+                # if the value is a dataclass, we need to check that it isn't
+                # comprised of promises. If it is, we need to resolve them.
+                for field in dataclasses.fields(v):
+                    if isinstance(getattr(v, field.name), Promise):
+                        setattr(v, field.name, resolve_attr_path_in_promise(getattr(v, field.name)))
+
             result[k] = TypeEngine.to_literal(ctx, v, t, var.type)
         except TypeTransformerFailedError as exc:
             raise TypeTransformerFailedError(f"Failed argument '{k}': {exc}") from exc
@@ -716,6 +723,21 @@ def create_task_output(
     return Output(*promises)  # type: ignore
 
 
+def _collection_contains_promise(maybe_collection: Any) -> bool:
+    """
+    Determine if there's a collection at any depth below the given object that contains a Promise.
+    """
+    if isinstance(maybe_collection, Promise):
+        return True
+    if isinstance(maybe_collection, list):
+        return any(_collection_contains_promise(x) for x in maybe_collection)
+    if isinstance(maybe_collection, dict):
+        return any(_collection_contains_promise(x) for x in maybe_collection.values())
+    if dataclasses.is_dataclass(maybe_collection):
+        return any(_collection_contains_promise(x) for x in maybe_collection.__dict__.values())
+    return False
+
+
 def binding_data_from_python_std(
     ctx: _flyte_context.FlyteContext,
     expected_literal_type: _type_models.LiteralType,
@@ -767,6 +789,32 @@ def binding_data_from_python_std(
         )
 
         return _literals_models.BindingData(collection=collection)
+
+    elif dataclasses.is_dataclass(t_value):
+        # If any of the attributes are a promise or contain a promise, we must
+        # convert the dataclass to a dictionary and then convert the dictionary,
+        # otherwise we can convert the dataclass directly
+        has_promise_attr = _collection_contains_promise(t_value)
+        if not has_promise_attr:
+            scalar = TypeEngine.to_literal(ctx, t_value, t_value_type, expected_literal_type).scalar
+            return _literals_models.BindingData(scalar=scalar)
+        else:
+            if (
+                expected_literal_type.simple != _type_models.SimpleType.STRUCT or 
+                expected_literal_type.structure is None
+            ):
+                raise AssertionError(
+                    f"this should be a Struct type and it is not: {type(t_value)} vs {expected_literal_type}"
+                )
+            m = _literals_models.BindingDataMap(
+                bindings={
+                    k: binding_data_from_python_std(
+                        ctx, expected_literal_type.structure.dataclass_type[k], v, type(v), nodes
+                    )
+                    for k, v in t_value.__dict__.items()
+                }
+            )
+            return _literals_models.BindingData(map=m)
 
     elif isinstance(t_value, dict):
         if (
