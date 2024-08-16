@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import inspect
 import typing
+import dataclasses
 from copy import deepcopy
 from enum import Enum
 from typing import Any, Coroutine, Dict, Hashable, List, Optional, Set, Tuple, Union, cast, get_args
@@ -90,13 +91,29 @@ def translate_inputs_to_literals(
         var = flyte_interface_types[k]
         t = native_types[k]
         try:
-            if type(v) is Promise:
-                v = resolve_attr_path_in_promise(v)
+            v = resolve_any_nested_promises(v)
             result[k] = TypeEngine.to_literal(ctx, v, t, var.type)
         except TypeTransformerFailedError as exc:
             raise TypeTransformerFailedError(f"Failed argument '{k}': {exc}") from exc
 
     return result
+
+
+def resolve_any_nested_promises(v: Any):
+    """Iterate through v in many forms to resolve any nested promises"""
+    if isinstance(v, Promise):
+        return resolve_attr_path_in_promise(v)
+    if isinstance(v, list):
+        return [resolve_any_nested_promises(x) for x in v]
+    if isinstance(v, dict):
+        return {k: resolve_any_nested_promises(v) for k, v in v.items()}
+    if isinstance(v, tuple):
+        return tuple(resolve_any_nested_promises(x) for x in v)
+    if dataclasses.is_dataclass(v):
+        # Set the fields of the dataclass to the resolved values
+        for field in dataclasses.fields(v):
+            setattr(v, field.name, resolve_any_nested_promises(getattr(v, field.name)))
+    return v
 
 
 def resolve_attr_path_in_promise(p: Promise) -> Promise:
@@ -141,12 +158,35 @@ def resolve_attr_path_in_promise(p: Promise) -> Promise:
     ):
         st = curr_val.value.value
         new_st = resolve_attr_path_in_pb_struct(st, attr_path=p.attr_path[used:])
+        new_st = _maybe_fix_deserialized_ints(p, new_st)
         literal_type = TypeEngine.to_literal_type(type(new_st))
         # Reconstruct the resolved result to flyte literal (because the resolved result might not be struct)
         curr_val = TypeEngine.to_literal(FlyteContextManager.current_context(), new_st, type(new_st), literal_type)
 
     p._val = curr_val
     return p
+
+
+def _maybe_fix_deserialized_ints(p: Promise, new_st: Any) -> Any:
+    """
+    This function is used to fix the deserialized integers in the promise, in the case where
+    the promise has a type of int, but the value is deserialized as a float.
+    """
+    if p._type is None:
+        # No typing, nothing to do
+        return new_st
+    
+    if p._type.simple != SimpleType.INTEGER:
+        # Not an integer, nothing to do
+        return new_st
+    
+    if type(new_st) is not int:
+        if type(new_st) is float:
+            if int(new_st) == new_st:
+                return int(new_st)
+            raise ValueError(f"Resolved value {new_st} is a float, but the promise is an integer")
+        raise ValueError(f"Resolved value {new_st} is not an integer, but the promise is an integer")
+    return new_st
 
 
 def resolve_attr_path_in_pb_struct(st: _struct.Struct, attr_path: List[Union[str, int]]) -> _struct.Struct:
@@ -595,6 +635,12 @@ class Promise(object):
         if new_promise.ref is not None:
             # The attr_path on the ref node is for remote execute
             new_promise._ref = new_promise.ref.with_attr(key)
+
+        if self._type is not None:
+            if self._type.simple == SimpleType.STRUCT and self._type.structure is not None:
+                # We should specify the type of this node, such that if it's used alone
+                # it can be resolved correctly.
+                new_promise._type = self._type.structure.dataclass_type[key]
 
         return new_promise
 

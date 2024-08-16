@@ -351,7 +351,7 @@ class Task(object):
         if len(output_names) == 0:
             return VoidPromise(self.name)
 
-        vals = [Promise(var, outputs_literals[var]) for var in output_names]
+        vals = [Promise(var, outputs_literals[var], type=self.interface.outputs[var].type) for var in output_names]
         return create_task_output(vals, self.python_interface)
 
     def __call__(self, *args: object, **kwargs: object) -> Union[Tuple[Promise], Promise, VoidPromise, Tuple, None]:
