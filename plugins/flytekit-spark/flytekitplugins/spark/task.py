@@ -186,7 +186,11 @@ class PysparkFunctionTask(AsyncAgentExecutorMixin, PythonFunctionTask[Spark]):
 
         ctx = FlyteContextManager.current_context()
         task_name = self.task_function.__name__
-        execution_id = user_params.execution_id.short_string()
+        execution_id = user_params.execution_id.name
+        print(f"execution_id: {execution_id}")
+        print(f"task_name: {task_name}")
+        print(f"ctx.execution_state: {ctx.execution_state}")
+        print(f"execution_id: {user_params.execution_id}")
         sess_builder = _pyspark.sql.SparkSession.builder.appName(f"FlyteSpark: {task_name} {execution_id}")
         if not (ctx.execution_state and ctx.execution_state.mode == ExecutionState.Mode.TASK_EXECUTION):
             # If either of above cases is not true, then we are in local execution of this task
