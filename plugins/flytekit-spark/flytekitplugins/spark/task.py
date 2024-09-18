@@ -187,7 +187,7 @@ class PysparkFunctionTask(AsyncAgentExecutorMixin, PythonFunctionTask[Spark]):
         ctx = FlyteContextManager.current_context()
         task_name = self.task_function.__name__
         # on kube, this is the pod name which contains the execution id
-        hostname = os.environ.get("HOSTNAME")
+        hostname = os.environ.get("HOSTNAME", None)
         
         sess_builder = _pyspark.sql.SparkSession.builder.appName(f"FlyteSpark: {task_name} {hostname}")
         if not (ctx.execution_state and ctx.execution_state.mode == ExecutionState.Mode.TASK_EXECUTION):
