@@ -719,9 +719,18 @@ class PythonFunctionWorkflow(WorkflowBase, ClassStorageTaskResolver):
                     # Workflow inputs should be a subset of failure node inputs.
                     joined_inputs = failure_node_inputs | workflow_inputs
                     if joined_inputs != failure_node_inputs:
-                        for k in failure_node_inputs.keys():
-                            if not issubclass(joined_inputs[k], failure_node_inputs[k]):
-                                raise FlyteFailureNodeInputMismatchException(self.on_failure, self)
+                        try:
+                            # See if individual inputs are the same, or subclasses of each other
+                            for k in joined_inputs.keys():
+                                if joined_inputs[k] == failure_node_inputs[k]:
+                                    continue # these are the same
+                                elif issubclass(joined_inputs[k], failure_node_inputs[k]):
+                                    continue # these are subclasses
+                                else:
+                                    raise FlyteFailureNodeInputMismatchException(self.on_failure, self)
+                        except TypeError:
+                            # More complex types, like unions, do not have subclass support
+                            raise FlyteFailureNodeInputMismatchException(self.on_failure, self)
                     additional_keys = failure_node_inputs.keys() - workflow_inputs.keys()
                     # Raising an error if the additional inputs in the failure node are not optional.
                     for k in additional_keys:
