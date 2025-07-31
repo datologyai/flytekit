@@ -57,6 +57,7 @@ T = typing.TypeVar("T")
 DEFINITIONS = "definitions"
 TITLE = "title"
 
+JSON_TRANSFORMER_CACHE = {}
 
 class BatchSize:
     """
@@ -452,8 +453,12 @@ class DataclassTransformer(TypeTransformer[object]):
                 schema = JSONSchema().dump(s)
             else:  # DataClassJSONMixin
                 from mashumaro.jsonschema import build_json_schema
-
-                schema = build_json_schema(cast(DataClassJSONMixin, self._get_origin_type_in_annotation(t))).to_dict()
+                origin_type = self._get_origin_type_in_annotation(t)
+                if origin_type not in JSON_TRANSFORMER_CACHE:
+                    schema = build_json_schema(cast(DataClassJSONMixin, origin_type)).to_dict()
+                    JSON_TRANSFORMER_CACHE[origin_type] = schema
+                else:
+                    schema = JSON_TRANSFORMER_CACHE[origin_type]
         except Exception as e:
             # https://github.com/lovasoa/marshmallow_dataclass/issues/13
             logger.warning(
